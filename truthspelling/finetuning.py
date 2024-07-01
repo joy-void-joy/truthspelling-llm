@@ -5,9 +5,6 @@
 
 
 # %%
-from torch.utils.data import Dataset
-from .type import OutputAnthropic
-
 import pathlib
 import torch
 from tqdm import tqdm, trange
@@ -16,7 +13,6 @@ from transformers import AutoTokenizer
 from transformers import set_seed
 
 from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
-from trl.core import LengthSampler
 
 import uuid
 
@@ -25,32 +21,38 @@ from .embedding import get_questionner_context, score_distinguisher
 from .generate_scenario import get_scenario
 
 
-tqdm.pandas()
-
-set_seed(42)
-
 run_name = uuid.uuid4().hex
 print("Run name:", run_name)
 
 model_id = "gpt2"
+min_loss = 0.1
+seed = 42
+batch_size = 32
+gen_len = 20
+num_epoch = 10_000
+reward_multiplier = 0.2
 
+tqdm.pandas()
+set_seed(seed)
 config = PPOConfig(
     project_kwargs={"logging_dir": "./data/logs"},
     model_name=model_id,
-    learning_rate=1.41e-5,
+    learning_rate=1e-3,
     log_with="tensorboard",
-    seed=42,
+    seed=seed,
+    batch_size=batch_size,
+    mini_batch_size=batch_size,
+    exp_name=run_name,
+    task_name=run_name,
 )
 
-sent_kwargs = {
-    "return_all_scores": True,
-    "function_to_apply": "none",
-    "batch_size": 16,
-}
 
 log_folder = pathlib.Path(f"./data/scenarios/{run_name}/")
 
 model = AutoModelForCausalLMWithValueHead.from_pretrained(
+    config.model_name,
+)
+ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(
     config.model_name,
 )
 tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -58,47 +60,12 @@ tokenizer = AutoTokenizer.from_pretrained(model_id)
 tokenizer.pad_token = tokenizer.eos_token
 
 
-max_length = 1024
-num_epoch = 10_000
-
-
-class ScenarioDataset(Dataset):
-    def __len__(self):
-        return num_epoch
-
-    def __getitem__(self, idx: int):
-        result = OutputAnthropic.model_validate_json(
-            pathlib.Path("./2.json").read_text()
-        )
-        query = get_questionner_context(result)
-
-        encoding = tokenizer.encode(
-            query,
-            add_special_tokens=True,
-            truncation=True,
-            return_attention_mask=True,
-            return_tensors="pt",
-        )
-
-        return result.model_dump() | {
-            "idx": idx,
-            "query": query,
-            "input_ids": encoding.flatten(),  # type: ignore
-        }
-        # return get_scenario(idx, log_folder / f"{idx}" / "scenario.json")
-
-
 ppo_trainer: PPOTrainer = PPOTrainer(  # type: ignore
     config=config,
     model=model,
-    # ref_model=ref_model,
+    ref_model=ref_model,
     tokenizer=tokenizer,
-    dataset=ScenarioDataset(),
 )
-
-output_min_length = 4
-output_max_length = 20
-output_length_sampler = LengthSampler(output_min_length, output_max_length)
 
 generation_kwargs = {
     "min_length": -1,
@@ -106,58 +73,60 @@ generation_kwargs = {
     "top_p": 1.0,
     "do_sample": True,
     "pad_token_id": tokenizer.eos_token_id,
+    "max_new_tokens": gen_len,
 }
 
-batch_size = 16
 
-for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):  # type: ignore
-    (f"Starting epoch {epoch}")
-    debug(len(batch))
+for epoch in trange(num_epoch):  # type: ignore
+    setting = get_scenario(epoch, log_folder / f"{epoch}" / "scenario.json")
+    query = get_questionner_context(setting)
 
-    for step in trange(50):
-        query_tensors = []
-        response_tensors = []
-        reward_tensors = []
+    encoding = tokenizer.encode(
+        query,
+        add_special_tokens=True,
+        truncation=True,
+        return_attention_mask=True,
+        return_tensors="pt",
+    ).to("cuda")  # type: ignore
+    query_encoded = encoding.flatten()
 
-        for i in range(debug(len(batch))):
-            query_tensors.append(batch["input_ids"][i])
-            setting: OutputAnthropic = OutputAnthropic(
-                answer=batch["answer"][i],
-                question=batch["question"][i],
-                scenario_honest=OutputAnthropic.Scenario(
-                    context=batch["scenario_honest"]["context"][i]
-                ),
-                scenario_deceptive=OutputAnthropic.Scenario(
-                    context=batch["scenario_deceptive"]["context"][i]
-                ),
-                deceptive_thinking=batch["deceptive_thinking"][i],
-                honest_thinking=batch["honest_thinking"][i],
-                questionner_scenario=batch["questionner_scenario"][i],
-            )
+    for step in trange(50, leave=True):
+        response_tensors = ppo_trainer.generate(
+            [query_encoded] * batch_size,
+            **generation_kwargs,
+            eos_token_id=tokenizer.eos_token_id,
+            return_prompt=False,
+        )
+        responses = tokenizer.batch_decode(response_tensors, skip_special_tokens=True)
 
-            gen_len = 20
-            generation_kwargs["max_new_tokens"] = gen_len
+        rewards = score_distinguisher(
+            setting=setting,
+            distinguishers=responses,
+            log_file=log_folder / f"{epoch}" / f"{step}" / "distinguishers.json",
+        )
 
-            response = ppo_trainer.generate(
-                ((batch)["input_ids"][i]),
-                **generation_kwargs,
-                return_prompt=False,
-            )
-            response_tensors.append(response.squeeze()[-gen_len:])
+        reward_tensors = [torch.tensor(i) * reward_multiplier for i in rewards]
 
-            loss = score_distinguisher(
-                setting=setting,
-                distinguisher=tokenizer.decode(response.squeeze()[-gen_len:]),
-                log_file=log_folder / f"{epoch}" / f"{step}.json",
-            )
-            reward = 1 / loss - 1
-            reward_tensors.append(reward)
-
-            if loss < 0.1:
-                ("Early stopping", loss)
-                break
+        if any(i > 1 / min_loss - 1 for i in rewards):
+            break
         else:
             stats = ppo_trainer.step(
-                *debug(query_tensors, response_tensors, reward_tensors)
+                [query_encoded] * batch_size,
+                response_tensors,  # type: ignore
+                reward_tensors,  # type: ignore
             )
-            ppo_trainer.log_stats(stats, batch, reward_tensors)
+            ppo_trainer.log_stats(
+                stats,
+                {"query": [query] * batch_size, "response": responses},
+                reward_tensors,  # type: ignore
+            )
+
+    checkpoint_dir = log_folder / f"{epoch}"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    model.save_pretrained(checkpoint_dir)
+    tokenizer.save_pretrained(checkpoint_dir)
+
+    try:
+        torch.save(ppo_trainer.optimizer.state_dict(), checkpoint_dir / "optimizer.pt")
+    except:
+        continue

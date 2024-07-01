@@ -4,7 +4,6 @@ from anthropic.types import ToolUseBlock
 import json
 import pathlib
 import anthropic
-import random
 
 from .type import OutputAnthropic
 
@@ -54,4 +53,4 @@ Please be creative, and use the random seed {seed}!
         indent=2,
     )
 
-    return result.input  # type: ignore
+    return OutputAnthropic(**result.input)  # type: ignore

@@ -5,12 +5,14 @@ from pydantic import Field
 
 class OutputAnthropic(pydantic.BaseModel):
     questionner_name: str = Field(
-        description="The name of the person asking the question."
+        description="The name of the person asking the question. Be creative, use names beside 'Emily' and 'Alex'"
     )
     answerer_name: str = Field(
-        description="The name of the person answering the question."
+        description="The name of the person answering the question. Be creative, use names beside 'Emily' and 'Alex'"
     )
-    setting: str = Field("General setting of the question.")
+    setting: str = Field(
+        "General setting of the question. Be creative, use settings beside startups, project managements, and colleges."
+    )
 
     class Scenario(pydantic.BaseModel):
         context: str = Field(
@@ -35,6 +37,10 @@ class OutputAnthropic(pydantic.BaseModel):
 
 
 class Save(pydantic.BaseModel):
-    distinguisher: str
-    honest_answer: str
-    deceptive_answer: str
+    class Line(pydantic.BaseModel):
+        distinguisher: str
+        score: float
+        honest_answer: str
+        deceptive_answer: str
+
+    lines: list[Line]
