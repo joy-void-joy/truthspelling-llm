@@ -14,3 +14,5 @@ You can analyze high scoring answers with
 ```
 python -m truthspelling.analyze_scores
 ```
+
+Data for previous runs are available at https://whatisthis.world/truthspelling
