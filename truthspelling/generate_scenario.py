@@ -4,6 +4,7 @@ from anthropic.types import ToolUseBlock
 import json
 import pathlib
 import anthropic
+import tenacity
 
 from .type import OutputAnthropic
 
@@ -13,6 +14,7 @@ client = anthropic.Anthropic(
 )
 
 
+@tenacity.retry()
 def get_scenario(seed: int, log_file: pathlib.Path) -> OutputAnthropic:
     log_file.parent.mkdir(parents=True, exist_ok=True)
 

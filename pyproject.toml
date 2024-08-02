@@ -19,6 +19,7 @@ lightning = "^2.3.1"
 torchmetrics = "^1.4.0.post0"
 openai = "^1.35.7"
 langchain-openai = "^0.1.13"
+sentencepiece = "^0.2.0"
 
 
 [tool.poetry.group.lint.dependencies]
@@ -27,6 +28,7 @@ ruff = "^0.4.9"
 
 [tool.poetry.group.dev.dependencies]
 ipykernel = "^6.29.4"
+devtools = "^0.12.2"
 
 
 [tool.poetry.group.log.dependencies]
